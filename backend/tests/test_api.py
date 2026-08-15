@@ -517,6 +517,82 @@ class TestAdmin:
         )
         assert response.status_code == 200
 
+    def test_rebinding_keeps_the_members_expenses_and_balance(self, client):
+        """A new phone reclaiming a released name inherits the same member record.
+
+        This is the lost-phone recovery path: nothing that was already booked may
+        move, disappear, or turn into a second person with the same name.
+        """
+        admin = make_group(client)
+        slug = admin["group"]["slug"]
+        anna = client.post(
+            "/api/auth/login",
+            json={"group_slug": slug, "password": "sommer2026!", "display_name": "Anna"},
+        ).json()
+        anna_id = anna["member"]["id"]
+
+        client.post(
+            "/api/expenses",
+            headers=auth_header(anna),
+            json={
+                "description": "Mietwagen",
+                "amount_cents": 24000,
+                "payer_id": anna_id,
+                "expense_date": str(date.today()),
+                "split_type": "equal",
+                "participant_ids": [anna_id, admin["member"]["id"]],
+            },
+        )
+        before = client.get("/api/balances", headers=auth_header(admin)).json()
+
+        # Anna's phone is gone: the admin frees the name, a new phone claims it.
+        client.post(f"/api/admin/members/{anna_id}/release", headers=auth_header(admin))
+        new_phone = client.post(
+            "/api/auth/login",
+            json={"group_slug": slug, "password": "sommer2026!", "display_name": "Anna"},
+        )
+        assert new_phone.status_code == 200
+        reclaimed = new_phone.json()
+
+        # Same member id -- not a second "Anna" alongside the old one.
+        assert reclaimed["member"]["id"] == anna_id
+        assert len(client.get("/api/members", headers=auth_header(admin)).json()) == 2
+
+        after = client.get("/api/balances", headers=auth_header(admin)).json()
+        assert after["balances"] == before["balances"]
+        assert after["total_spent_cents"] == 24000
+
+        # And the new phone still owns what the old one entered.
+        expenses = client.get("/api/expenses", headers=auth_header(reclaimed)).json()
+        assert expenses[0]["created_by_id"] == anna_id
+        assert (
+            client.delete(
+                f"/api/expenses/{expenses[0]['id']}", headers=auth_header(reclaimed)
+            ).status_code
+            == 204
+        )
+
+    def test_same_phone_returns_without_admin_help(self, client):
+        """An expired session on the *same* phone needs no admin: the device id proves it."""
+        admin = make_group(client)
+        slug = admin["group"]["slug"]
+        anna = client.post(
+            "/api/auth/login",
+            json={"group_slug": slug, "password": "sommer2026!", "display_name": "Anna"},
+        ).json()
+
+        again = client.post(
+            "/api/auth/login",
+            json={
+                "group_slug": slug,
+                "password": "sommer2026!",
+                "display_name": "Anna",
+                "device_id": anna["device_id"],
+            },
+        )
+        assert again.status_code == 200
+        assert again.json()["member"]["id"] == anna["member"]["id"]
+
     def test_non_admin_cannot_release(self, client):
         admin = make_group(client)
         slug = admin["group"]["slug"]
