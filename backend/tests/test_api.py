@@ -1,0 +1,558 @@
+"""End-to-end API tests against an in-memory SQLite database.
+
+The production database is PostgreSQL; SQLite keeps the tests runnable without a
+container. UUID and JSON usage here is portable across both.
+"""
+
+import io
+import uuid
+from datetime import date
+
+import pytest
+from fastapi.testclient import TestClient
+from PIL import Image
+from sqlalchemy import create_engine
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+from sqlalchemy.types import CHAR, TypeDecorator
+
+
+class SqliteUUID(TypeDecorator):
+    """Store UUIDs as text so the PostgreSQL models load under SQLite."""
+
+    impl = CHAR(36)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return None if value is None else str(value)
+
+    def process_result_value(self, value, dialect):
+        return None if value is None else uuid.UUID(value)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _patch_uuid_type():
+    PGUUID.load_dialect_impl = lambda self, dialect: (  # type: ignore[method-assign]
+        dialect.type_descriptor(SqliteUUID()) if dialect.name == "sqlite" else dialect.type_descriptor(self)
+    )
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    from app import database, main, rate_limit
+    from app.config import settings
+
+    settings.upload_dir = tmp_path / "receipts"
+    settings.upload_dir.mkdir(parents=True, exist_ok=True)
+
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    TestingSession = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    database.Base.metadata.create_all(bind=engine)
+
+    # main imported `engine` by value, so both references need redirecting or the
+    # startup hook and the health check would dial the real PostgreSQL host.
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.setattr(main, "engine", engine)
+
+    def override_db():
+        db = TestingSession()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    main.app.dependency_overrides[database.get_db] = override_db
+    rate_limit._ATTEMPTS.clear()
+
+    with TestClient(main.app) as c:
+        yield c
+
+    main.app.dependency_overrides.clear()
+
+
+def make_group(client, name="Mallorca 2026", password="sommer2026!", admin="Leo"):
+    response = client.post(
+        "/api/auth/groups",
+        json={"name": name, "password": password, "currency": "EUR", "admin_name": admin},
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def auth_header(session):
+    return {"Authorization": f"Bearer {session['access_token']}"}
+
+
+def photo_bytes(size=(800, 1200), fmt="JPEG"):
+    buffer = io.BytesIO()
+    Image.new("RGB", size, (240, 240, 240)).save(buffer, format=fmt)
+    return buffer.getvalue()
+
+
+class TestAuth:
+    def test_create_group_returns_admin_session(self, client):
+        session = make_group(client)
+        assert session["member"]["is_admin"] is True
+        assert session["member"]["display_name"] == "Leo"
+        assert session["device_id"]
+
+    def test_friend_joins_with_group_password(self, client):
+        group = make_group(client)
+        response = client.post(
+            "/api/auth/login",
+            json={
+                "group_slug": group["group"]["slug"],
+                "password": "sommer2026!",
+                "display_name": "Anna",
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["member"]["is_admin"] is False
+
+    def test_wrong_password_is_rejected(self, client):
+        group = make_group(client)
+        response = client.post(
+            "/api/auth/login",
+            json={
+                "group_slug": group["group"]["slug"],
+                "password": "falsch",
+                "display_name": "Anna",
+            },
+        )
+        assert response.status_code == 401
+
+    def test_name_is_locked_to_the_first_device(self, client):
+        group = make_group(client)
+        slug = group["group"]["slug"]
+        first = client.post(
+            "/api/auth/login",
+            json={"group_slug": slug, "password": "sommer2026!", "display_name": "Anna"},
+        ).json()
+
+        # A different phone with the correct group password still cannot be "Anna".
+        stolen = client.post(
+            "/api/auth/login",
+            json={"group_slug": slug, "password": "sommer2026!", "display_name": "Anna"},
+        )
+        assert stolen.status_code == 409
+
+        # Anna's own phone gets back in by presenting its device id.
+        again = client.post(
+            "/api/auth/login",
+            json={
+                "group_slug": slug,
+                "password": "sommer2026!",
+                "display_name": "Anna",
+                "device_id": first["device_id"],
+            },
+        )
+        assert again.status_code == 200
+
+    def test_names_are_case_insensitive(self, client):
+        group = make_group(client)
+        slug = group["group"]["slug"]
+        client.post(
+            "/api/auth/login",
+            json={"group_slug": slug, "password": "sommer2026!", "display_name": "Anna"},
+        )
+        clash = client.post(
+            "/api/auth/login",
+            json={"group_slug": slug, "password": "sommer2026!", "display_name": "anna"},
+        )
+        assert clash.status_code == 409
+
+    def test_login_is_rate_limited(self, client):
+        group = make_group(client)
+        slug = group["group"]["slug"]
+        codes = [
+            client.post(
+                "/api/auth/login",
+                json={"group_slug": slug, "password": f"wrong{i}", "display_name": "Anna"},
+            ).status_code
+            for i in range(12)
+        ]
+        assert 429 in codes
+
+    def test_endpoints_require_a_token(self, client):
+        assert client.get("/api/expenses").status_code == 401
+
+    def test_tampered_token_is_rejected(self, client):
+        session = make_group(client)
+        bad = {"Authorization": f"Bearer {session['access_token'][:-3]}xyz"}
+        assert client.get("/api/expenses", headers=bad).status_code == 401
+
+
+class TestExpenses:
+    @pytest.fixture
+    def trip(self, client):
+        admin = make_group(client)
+        slug = admin["group"]["slug"]
+        anna = client.post(
+            "/api/auth/login",
+            json={"group_slug": slug, "password": "sommer2026!", "display_name": "Anna"},
+        ).json()
+        return {"admin": admin, "anna": anna}
+
+    def test_equal_split_creates_matching_shares(self, client, trip):
+        admin = trip["admin"]
+        members = client.get("/api/members", headers=auth_header(admin)).json()
+        ids = [m["id"] for m in members]
+
+        response = client.post(
+            "/api/expenses",
+            headers=auth_header(admin),
+            json={
+                "description": "Abendessen",
+                "amount_cents": 10000,
+                "payer_id": admin["member"]["id"],
+                "expense_date": str(date.today()),
+                "category": "food",
+                "split_type": "equal",
+                "participant_ids": ids,
+            },
+        )
+        assert response.status_code == 201, response.text
+        body = response.json()
+        assert sum(s["amount_cents"] for s in body["shares"]) == 10000
+
+    def test_exact_split_must_add_up(self, client, trip):
+        admin = trip["admin"]
+        members = client.get("/api/members", headers=auth_header(admin)).json()
+        response = client.post(
+            "/api/expenses",
+            headers=auth_header(admin),
+            json={
+                "description": "Taxi",
+                "amount_cents": 5000,
+                "payer_id": admin["member"]["id"],
+                "expense_date": str(date.today()),
+                "split_type": "exact",
+                "shares": [
+                    {"member_id": members[0]["id"], "value": 2000},
+                    {"member_id": members[1]["id"], "value": 2000},
+                ],
+            },
+        )
+        assert response.status_code == 400
+        assert "50.00" in response.json()["detail"]
+
+    def test_cannot_reference_a_member_of_another_group(self, client, trip):
+        other = make_group(client, name="Andere Reise", admin="Fremd")
+        response = client.post(
+            "/api/expenses",
+            headers=auth_header(trip["admin"]),
+            json={
+                "description": "Fremd",
+                "amount_cents": 1000,
+                "payer_id": other["member"]["id"],
+                "expense_date": str(date.today()),
+                "split_type": "equal",
+                "participant_ids": [other["member"]["id"]],
+            },
+        )
+        assert response.status_code == 400
+
+    def test_expenses_are_scoped_to_the_group(self, client, trip):
+        admin = trip["admin"]
+        client.post(
+            "/api/expenses",
+            headers=auth_header(admin),
+            json={
+                "description": "Geheim",
+                "amount_cents": 1000,
+                "payer_id": admin["member"]["id"],
+                "expense_date": str(date.today()),
+                "split_type": "equal",
+                "participant_ids": [admin["member"]["id"]],
+            },
+        )
+        other = make_group(client, name="Andere Reise", admin="Fremd")
+        visible = client.get("/api/expenses", headers=auth_header(other)).json()
+        assert visible == []
+
+    def test_only_author_or_admin_may_delete(self, client, trip):
+        anna = trip["anna"]
+        created = client.post(
+            "/api/expenses",
+            headers=auth_header(anna),
+            json={
+                "description": "Eis",
+                "amount_cents": 600,
+                "payer_id": anna["member"]["id"],
+                "expense_date": str(date.today()),
+                "split_type": "equal",
+                "participant_ids": [anna["member"]["id"]],
+            },
+        ).json()
+
+        # The admin may clean up anyone's entry.
+        assert (
+            client.delete(
+                f"/api/expenses/{created['id']}", headers=auth_header(trip["admin"])
+            ).status_code
+            == 204
+        )
+
+    def test_non_author_non_admin_is_refused(self, client, trip):
+        admin, anna = trip["admin"], trip["anna"]
+        created = client.post(
+            "/api/expenses",
+            headers=auth_header(admin),
+            json={
+                "description": "Hotel",
+                "amount_cents": 20000,
+                "payer_id": admin["member"]["id"],
+                "expense_date": str(date.today()),
+                "split_type": "equal",
+                "participant_ids": [admin["member"]["id"]],
+            },
+        ).json()
+        response = client.delete(f"/api/expenses/{created['id']}", headers=auth_header(anna))
+        assert response.status_code == 403
+
+    def test_rejects_zero_amount(self, client, trip):
+        admin = trip["admin"]
+        response = client.post(
+            "/api/expenses",
+            headers=auth_header(admin),
+            json={
+                "description": "Nichts",
+                "amount_cents": 0,
+                "payer_id": admin["member"]["id"],
+                "expense_date": str(date.today()),
+                "split_type": "equal",
+                "participant_ids": [admin["member"]["id"]],
+            },
+        )
+        assert response.status_code == 422
+
+
+class TestBalances:
+    def test_balance_reflects_who_paid(self, client):
+        admin = make_group(client)
+        slug = admin["group"]["slug"]
+        client.post(
+            "/api/auth/login",
+            json={"group_slug": slug, "password": "sommer2026!", "display_name": "Anna"},
+        )
+        members = client.get("/api/members", headers=auth_header(admin)).json()
+        ids = [m["id"] for m in members]
+
+        client.post(
+            "/api/expenses",
+            headers=auth_header(admin),
+            json={
+                "description": "Ferienwohnung",
+                "amount_cents": 40000,
+                "payer_id": admin["member"]["id"],
+                "expense_date": str(date.today()),
+                "split_type": "equal",
+                "participant_ids": ids,
+            },
+        )
+
+        summary = client.get("/api/balances", headers=auth_header(admin)).json()
+        assert summary["total_spent_cents"] == 40000
+        assert sum(b["net_cents"] for b in summary["balances"]) == 0
+        assert len(summary["suggested_transfers"]) == 1
+        assert summary["suggested_transfers"][0]["amount_cents"] == 20000
+
+    def test_settlement_zeroes_the_balance(self, client):
+        admin = make_group(client)
+        slug = admin["group"]["slug"]
+        client.post(
+            "/api/auth/login",
+            json={"group_slug": slug, "password": "sommer2026!", "display_name": "Anna"},
+        )
+        members = client.get("/api/members", headers=auth_header(admin)).json()
+        anna = next(m for m in members if m["display_name"] == "Anna")
+
+        client.post(
+            "/api/expenses",
+            headers=auth_header(admin),
+            json={
+                "description": "Tanken",
+                "amount_cents": 10000,
+                "payer_id": admin["member"]["id"],
+                "expense_date": str(date.today()),
+                "split_type": "equal",
+                "participant_ids": [m["id"] for m in members],
+            },
+        )
+        client.post(
+            "/api/settlements",
+            headers=auth_header(admin),
+            json={
+                "from_member_id": anna["id"],
+                "to_member_id": admin["member"]["id"],
+                "amount_cents": 5000,
+            },
+        )
+
+        summary = client.get("/api/balances", headers=auth_header(admin)).json()
+        assert all(b["net_cents"] == 0 for b in summary["balances"])
+        assert summary["suggested_transfers"] == []
+
+
+class TestReceipts:
+    @pytest.fixture
+    def expense(self, client):
+        admin = make_group(client)
+        created = client.post(
+            "/api/expenses",
+            headers=auth_header(admin),
+            json={
+                "description": "Supermarkt",
+                "amount_cents": 4523,
+                "payer_id": admin["member"]["id"],
+                "expense_date": str(date.today()),
+                "category": "groceries",
+                "split_type": "equal",
+                "participant_ids": [admin["member"]["id"]],
+            },
+        ).json()
+        return admin, created
+
+    def test_upload_and_fetch(self, client, expense):
+        admin, created = expense
+        response = client.post(
+            f"/api/expenses/{created['id']}/receipts",
+            headers=auth_header(admin),
+            files={"file": ("kassenzettel.jpg", photo_bytes(), "image/jpeg")},
+        )
+        assert response.status_code == 201, response.text
+        receipt_id = response.json()["id"]
+
+        image = client.get(f"/api/receipts/{receipt_id}", headers=auth_header(admin))
+        assert image.status_code == 200
+        assert image.headers["content-type"] == "image/jpeg"
+
+        thumb = client.get(f"/api/receipts/{receipt_id}?thumb=true", headers=auth_header(admin))
+        assert thumb.status_code == 200
+        assert len(thumb.content) < len(image.content)
+
+    def test_large_image_is_downscaled(self, client, expense):
+        admin, created = expense
+        response = client.post(
+            f"/api/expenses/{created['id']}/receipts",
+            headers=auth_header(admin),
+            files={"file": ("gross.jpg", photo_bytes((4000, 3000)), "image/jpeg")},
+        )
+        assert response.status_code == 201
+        image = client.get(f"/api/receipts/{response.json()['id']}", headers=auth_header(admin))
+        with Image.open(io.BytesIO(image.content)) as stored:
+            assert max(stored.size) <= 2000
+
+    def test_non_image_is_rejected(self, client, expense):
+        admin, created = expense
+        response = client.post(
+            f"/api/expenses/{created['id']}/receipts",
+            headers=auth_header(admin),
+            files={"file": ("virus.jpg", b"MZ\x90\x00 not an image", "image/jpeg")},
+        )
+        assert response.status_code == 400
+
+    def test_wrong_content_type_is_rejected(self, client, expense):
+        admin, created = expense
+        response = client.post(
+            f"/api/expenses/{created['id']}/receipts",
+            headers=auth_header(admin),
+            files={"file": ("doc.pdf", b"%PDF-1.4", "application/pdf")},
+        )
+        assert response.status_code == 415
+
+    def test_receipt_is_not_visible_to_another_group(self, client, expense):
+        admin, created = expense
+        receipt_id = client.post(
+            f"/api/expenses/{created['id']}/receipts",
+            headers=auth_header(admin),
+            files={"file": ("beleg.jpg", photo_bytes(), "image/jpeg")},
+        ).json()["id"]
+
+        other = make_group(client, name="Andere Reise", admin="Fremd")
+        response = client.get(f"/api/receipts/{receipt_id}", headers=auth_header(other))
+        assert response.status_code == 404
+
+    def test_deleting_the_expense_removes_the_file(self, client, expense):
+        from app.storage import resolve_path
+
+        admin, created = expense
+        client.post(
+            f"/api/expenses/{created['id']}/receipts",
+            headers=auth_header(admin),
+            files={"file": ("beleg.jpg", photo_bytes(), "image/jpeg")},
+        )
+        detail = client.get(f"/api/expenses/{created['id']}", headers=auth_header(admin)).json()
+        assert len(detail["receipts"]) == 1
+
+        client.delete(f"/api/expenses/{created['id']}", headers=auth_header(admin))
+        assert not list(resolve_path(".").rglob("*.jpg"))
+
+
+class TestAdmin:
+    def test_admin_can_release_a_lost_phone(self, client):
+        admin = make_group(client)
+        slug = admin["group"]["slug"]
+        client.post(
+            "/api/auth/login",
+            json={"group_slug": slug, "password": "sommer2026!", "display_name": "Anna"},
+        )
+        members = client.get("/api/members", headers=auth_header(admin)).json()
+        anna = next(m for m in members if m["display_name"] == "Anna")
+
+        assert (
+            client.post(
+                f"/api/admin/members/{anna['id']}/release", headers=auth_header(admin)
+            ).status_code
+            == 204
+        )
+
+        # A new phone can now claim the name again.
+        response = client.post(
+            "/api/auth/login",
+            json={"group_slug": slug, "password": "sommer2026!", "display_name": "Anna"},
+        )
+        assert response.status_code == 200
+
+    def test_non_admin_cannot_release(self, client):
+        admin = make_group(client)
+        slug = admin["group"]["slug"]
+        anna = client.post(
+            "/api/auth/login",
+            json={"group_slug": slug, "password": "sommer2026!", "display_name": "Anna"},
+        ).json()
+        response = client.post(
+            f"/api/admin/members/{anna['member']['id']}/release", headers=auth_header(anna)
+        )
+        assert response.status_code == 403
+
+    def test_released_device_loses_its_session(self, client):
+        admin = make_group(client)
+        slug = admin["group"]["slug"]
+        anna = client.post(
+            "/api/auth/login",
+            json={"group_slug": slug, "password": "sommer2026!", "display_name": "Anna"},
+        ).json()
+        client.post(
+            f"/api/admin/members/{anna['member']['id']}/release", headers=auth_header(admin)
+        )
+        assert client.get("/api/expenses", headers=auth_header(anna)).status_code == 401
+
+    def test_password_rotation_blocks_the_old_password(self, client):
+        admin = make_group(client)
+        slug = admin["group"]["slug"]
+        client.post(
+            "/api/admin/password", headers=auth_header(admin), json={"new_password": "neu-2026!"}
+        )
+        old = client.post(
+            "/api/auth/login",
+            json={"group_slug": slug, "password": "sommer2026!", "display_name": "Neu"},
+        )
+        assert old.status_code == 401
+
+
+def test_health(client):
+    assert client.get("/api/health").json()["status"] == "ok"

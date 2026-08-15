@@ -1,0 +1,67 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-tripcost}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD fehlt - bitte .env anlegen}
+      POSTGRES_DB: ${POSTGRES_DB:-tripcost}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-tripcost} -d ${POSTGRES_DB:-tripcost}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # Not published to the host: only the api container needs to reach the database.
+    expose:
+      - '5432'
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-tripcost}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-tripcost}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET fehlt - bitte .env anlegen}
+      SESSION_DAYS: ${SESSION_DAYS:-90}
+      UPLOAD_DIR: /data/receipts
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+    volumes:
+      - receipts:/data/receipts
+    expose:
+      - '8000'
+
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - '${WEB_PORT:-8080}:80'
+
+  # Public HTTPS URL without opening a port on your router.
+  # Only starts when asked for: docker compose --profile tunnel up -d
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    profiles:
+      - tunnel
+    depends_on:
+      web:
+        condition: service_healthy
+    # Left empty on purpose: compose interpolates every service, including ones
+    # whose profile is inactive, so a required-variable marker here would break
+    # plain `docker compose up`. Without a token cloudflared exits with its own
+    # error message, which is the clearer signal anyway.
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    # Outbound only: cloudflared dials Cloudflare, nothing reaches in from outside.
+    networks:
+      - default
+
+volumes:
+  db_data:
+  receipts:
