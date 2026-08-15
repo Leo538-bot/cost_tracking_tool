@@ -4,13 +4,13 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import CurrentUser, get_group_member, require_admin, write_audit
 from ..models import Expense, ExpenseShare, Settlement
-from ..security import hash_password
+from ..security import generate_recovery_key, hash_password
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -41,6 +41,37 @@ def change_group_password(
         summary="Gruppen-Passwort geändert",
     )
     db.commit()
+
+
+class RecoveryKeyOut(BaseModel):
+    recovery_key: str
+
+
+@router.post("/recovery-key", response_model=RecoveryKeyOut)
+def regenerate_recovery_key(
+    request: Request,
+    user: CurrentUser = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Issue a fresh emergency key, invalidating the previous one.
+
+    Use this when the old key was lost, or after it has been shown to someone who
+    should not keep it. The value is returned once and only its hash is stored.
+    """
+    key = generate_recovery_key()
+    user.group.recovery_key_hash = hash_password(key)
+    user.group.recovery_key_set_at = func.now()
+    write_audit(
+        db,
+        request=request,
+        user=user,
+        action="group.recovery_key_reset",
+        entity_type="group",
+        entity_id=user.group.id,
+        summary="Neuer Notfall-Schlüssel erzeugt (alter ist ungültig)",
+    )
+    db.commit()
+    return RecoveryKeyOut(recovery_key=key)
 
 
 @router.post("/members/{member_id}/release", status_code=status.HTTP_204_NO_CONTENT)

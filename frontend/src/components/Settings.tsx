@@ -10,6 +10,7 @@ interface Props {
   activity: ActivityEntry[];
   onChanged: () => void;
   onLogout: () => void;
+  onRecoveryKeyIssued: (key: string) => void;
 }
 
 export default function Settings({
@@ -19,6 +20,7 @@ export default function Settings({
   activity,
   onChanged,
   onLogout,
+  onRecoveryKeyIssued,
 }: Props) {
   const [copied, setCopied] = useState(false);
   const [newPassword, setNewPassword] = useState('');
@@ -148,6 +150,35 @@ export default function Settings({
             </div>
             <button type="button" className="btn secondary" onClick={rotatePassword}>
               Passwort ändern
+            </button>
+          </div>
+        </>
+      )}
+
+      {me.is_admin && (
+        <>
+          <p className="section-title">Notfall-Schlüssel</p>
+          <div className="card">
+            <p className="hint" style={{ margin: '0 0 10px' }}>
+              Damit kommst du wieder rein, wenn dein Handy weg ist und dich niemand freigeben
+              kann. Zettel verloren? Erzeuge einen neuen — der alte wird dabei ungültig.
+            </p>
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={async () => {
+                if (!confirm('Neuen Notfall-Schlüssel erzeugen? Der alte gilt danach nicht mehr.'))
+                  return;
+                setError(null);
+                try {
+                  const { recovery_key } = await api.regenerateRecoveryKey();
+                  onRecoveryKeyIssued(recovery_key);
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : 'Erzeugen fehlgeschlagen.');
+                }
+              }}
+            >
+              Neuen Notfall-Schlüssel erzeugen
             </button>
           </div>
         </>

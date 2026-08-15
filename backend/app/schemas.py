@@ -46,6 +46,8 @@ class LoginRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=60)
     # Sent back by a returning device to prove it owns the claimed name.
     device_id: str | None = Field(default=None, max_length=64)
+    # Emergency path: overrides the device binding when the original phone is gone.
+    recovery_key: str | None = Field(default=None, max_length=64)
 
 
 class MemberOut(ORMModel):
@@ -70,6 +72,9 @@ class AuthResponse(BaseModel):
     device_id: str
     member: MemberOut
     group: GroupOut
+    # Set only on the two occasions a key is issued: when the trip is created and
+    # right after a recovery burned the previous one. Never retrievable later.
+    recovery_key: str | None = None
 
 
 # --- expenses ---------------------------------------------------------------

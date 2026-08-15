@@ -4,6 +4,7 @@ import Balances from './components/Balances';
 import ExpenseList from './components/ExpenseList';
 import ExpenseSheet from './components/ExpenseSheet';
 import Login from './components/Login';
+import RecoveryKeyNotice from './components/RecoveryKeyNotice';
 import Settings from './components/Settings';
 import {
   ActivityEntry,
@@ -36,6 +37,10 @@ export default function App() {
     expense: null,
   });
   const [loadError, setLoadError] = useState<string | null>(null);
+  // A freshly issued recovery key, held until the user confirms they wrote it down.
+  const [newKey, setNewKey] = useState<{ key: string; reason: 'created' | 'rotated' } | null>(
+    null,
+  );
 
   // Resume a stored session on app start; an expired token just drops to login.
   useEffect(() => {
@@ -99,11 +104,34 @@ export default function App() {
   }
 
   if (!session) {
-    return <Login onAuthenticated={setSession} />;
+    return (
+      <Login
+        onAuthenticated={(next, outcome) => {
+          if (next.recovery_key) {
+            setNewKey({
+              key: next.recovery_key,
+              reason: outcome === 'created' ? 'created' : 'rotated',
+            });
+          }
+          setSession(next);
+        }}
+      />
+    );
   }
 
   const { group, member: me } = session;
   const myBalance = summary?.balances.find((b) => b.member_id === me.id);
+
+  // Blocks the app until the key is acknowledged: it is unrecoverable once dismissed.
+  if (newKey) {
+    return (
+      <RecoveryKeyNotice
+        recoveryKey={newKey.key}
+        reason={newKey.reason}
+        onAcknowledge={() => setNewKey(null)}
+      />
+    );
+  }
 
   return (
     <div className="app">
@@ -170,6 +198,7 @@ export default function App() {
             activity={activity}
             onChanged={refresh}
             onLogout={logout}
+            onRecoveryKeyIssued={(key) => setNewKey({ key, reason: 'rotated' })}
           />
         )}
       </main>

@@ -15,8 +15,10 @@ from ..schemas import AuthResponse, GroupCreate, GroupOut, LoginRequest, MemberO
 from ..security import (
     constant_time_equals,
     create_access_token,
+    generate_recovery_key,
     hash_password,
     new_device_id,
+    normalise_recovery_key,
     verify_password,
 )
 
@@ -55,11 +57,17 @@ def _pick_color(db: Session, group_id) -> str:
 
 @router.post("/groups", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
 def create_group(payload: GroupCreate, request: Request, db: Session = Depends(get_db)):
-    """Create a trip and log the creator in as its admin."""
+    """Create a trip and log the creator in as its admin.
+
+    The recovery key returned here is the only time it is ever visible.
+    """
+    recovery_key = generate_recovery_key()
     group = Group(
         name=payload.name.strip(),
         slug=_unique_slug(db, payload.name),
         password_hash=hash_password(payload.password),
+        recovery_key_hash=hash_password(recovery_key),
+        recovery_key_set_at=func.now(),
         currency=payload.currency,
     )
     db.add(group)
@@ -101,6 +109,7 @@ def create_group(payload: GroupCreate, request: Request, db: Session = Depends(g
         device_id=device_id,
         member=MemberOut.model_validate(admin),
         group=GroupOut.model_validate(group),
+        recovery_key=recovery_key,
     )
 
 
@@ -113,7 +122,16 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
     """
     client_ip = request.client.host if request.client else "unknown"
     limiter_key = f"{client_ip}:{payload.group_slug}"
-    allowed, retry_after = rate_limit.check_and_record(limiter_key)
+    using_recovery = bool(payload.recovery_key and payload.recovery_key.strip())
+
+    if using_recovery:
+        allowed, retry_after = rate_limit.check_and_record(
+            f"recovery:{limiter_key}",
+            max_attempts=rate_limit.RECOVERY_MAX_ATTEMPTS,
+            window_seconds=rate_limit.RECOVERY_WINDOW_SECONDS,
+        )
+    else:
+        allowed, retry_after = rate_limit.check_and_record(limiter_key)
     if not allowed:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -142,7 +160,46 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
         )
     )
 
-    if member is None:
+    issued_recovery_key: str | None = None
+
+    if using_recovery:
+        # Emergency path: the phone that held this name is gone for good.
+        if group.recovery_key_hash is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Für diese Reise ist kein Notfall-Schlüssel hinterlegt.",
+            )
+        if not verify_password(
+            normalise_recovery_key(payload.recovery_key or ""), group.recovery_key_hash
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Der Notfall-Schlüssel stimmt nicht.",
+            )
+        if member is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    f"In dieser Reise gibt es niemanden mit dem Namen '{display_name}'. "
+                    "Der Notfall-Schlüssel stellt nur bestehende Namen wieder her."
+                ),
+            )
+
+        device_id = new_device_id()
+        member.device_id = device_id
+        # Reaching for the emergency key means admin access is broken, so the
+        # recovered member becomes admin -- otherwise the trip stays leaderless.
+        member.is_admin = True
+
+        # Burn the used key immediately and hand out a fresh one, so a key that
+        # was written down and passed around cannot be replayed.
+        issued_recovery_key = generate_recovery_key()
+        group.recovery_key_hash = hash_password(issued_recovery_key)
+        group.recovery_key_set_at = func.now()
+
+        action = "member.recover"
+        summary = f"{display_name} wurde per Notfall-Schlüssel wiederhergestellt"
+    elif member is None:
         device_id = new_device_id()
         member = Member(
             group_id=group.id,
@@ -192,12 +249,16 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
     db.refresh(member)
 
     rate_limit.clear(limiter_key)
+    if using_recovery:
+        rate_limit.clear(f"recovery:{limiter_key}")
+
     token = create_access_token(member_id=member.id, group_id=group.id, device_id=device_id)
     return AuthResponse(
         access_token=token,
         device_id=device_id,
         member=MemberOut.model_validate(member),
         group=GroupOut.model_validate(group),
+        recovery_key=issued_recovery_key,
     )
 
 

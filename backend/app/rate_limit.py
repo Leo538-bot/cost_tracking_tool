@@ -17,17 +17,24 @@ _LOCK = threading.Lock()
 WINDOW_SECONDS = 15 * 60
 MAX_ATTEMPTS = 10
 
+# The recovery key is the strongest secret in the system, so it gets a far
+# tighter budget than an ordinary password typo.
+RECOVERY_WINDOW_SECONDS = 60 * 60
+RECOVERY_MAX_ATTEMPTS = 5
 
-def check_and_record(key: str) -> tuple[bool, int]:
+
+def check_and_record(
+    key: str, *, max_attempts: int = MAX_ATTEMPTS, window_seconds: int = WINDOW_SECONDS
+) -> tuple[bool, int]:
     """Register an attempt. Returns (allowed, seconds_until_retry)."""
     now = time.monotonic()
     with _LOCK:
         bucket = _ATTEMPTS[key]
-        while bucket and now - bucket[0] > WINDOW_SECONDS:
+        while bucket and now - bucket[0] > window_seconds:
             bucket.popleft()
 
-        if len(bucket) >= MAX_ATTEMPTS:
-            return False, int(WINDOW_SECONDS - (now - bucket[0])) + 1
+        if len(bucket) >= max_attempts:
+            return False, int(window_seconds - (now - bucket[0])) + 1
 
         bucket.append(now)
         return True, 0

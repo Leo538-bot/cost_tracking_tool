@@ -2,8 +2,10 @@ import { FormEvent, useState } from 'react';
 
 import { ApiError, Session, api, storage } from '../lib/api';
 
+export type AuthOutcome = 'created' | 'joined' | 'recovered';
+
 interface Props {
-  onAuthenticated: (session: Session) => void;
+  onAuthenticated: (session: Session, outcome: AuthOutcome) => void;
 }
 
 export default function Login({ onAuthenticated }: Props) {
@@ -16,6 +18,8 @@ export default function Login({ onAuthenticated }: Props) {
   const [password, setPassword] = useState('');
   const [tripName, setTripName] = useState('');
   const [currency, setCurrency] = useState('EUR');
+  const [recovering, setRecovering] = useState(false);
+  const [recoveryKey, setRecoveryKey] = useState('');
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -36,13 +40,14 @@ export default function Login({ onAuthenticated }: Props) {
               display_name: name.trim(),
               // Proves this phone already owns the name it is asking for.
               device_id: storage.deviceId,
+              recovery_key: recovering ? recoveryKey.trim() : null,
             });
 
       storage.token = session.access_token;
       storage.deviceId = session.device_id;
       storage.lastSlug = session.group.slug;
       storage.lastName = session.member.display_name;
-      onAuthenticated(session);
+      onAuthenticated(session, mode === 'create' ? 'created' : recovering ? 'recovered' : 'joined');
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Unerwarteter Fehler.');
     } finally {
@@ -53,7 +58,8 @@ export default function Login({ onAuthenticated }: Props) {
   const canSubmit =
     name.trim().length > 0 &&
     password.length >= (mode === 'create' ? 8 : 1) &&
-    (mode === 'create' ? tripName.trim().length >= 2 : slug.trim().length > 0);
+    (mode === 'create' ? tripName.trim().length >= 2 : slug.trim().length > 0) &&
+    (!recovering || recoveryKey.replace(/[^a-zA-Z0-9]/g, '').length === 16);
 
   return (
     <div className="auth">
@@ -159,6 +165,26 @@ export default function Login({ onAuthenticated }: Props) {
           )}
         </div>
 
+        {mode === 'join' && recovering && (
+          <div className="field">
+            <label htmlFor="recovery">Notfall-Schlüssel</label>
+            <input
+              id="recovery"
+              value={recoveryKey}
+              onChange={(e) => setRecoveryKey(e.target.value)}
+              placeholder="XXXX-XXXX-XXXX-XXXX"
+              autoCapitalize="characters"
+              autoCorrect="off"
+              spellCheck={false}
+              style={{ letterSpacing: '0.08em' }}
+            />
+            <span className="hint">
+              Holt dir deinen Namen auf dieses Gerät zurück, auch wenn er noch an ein altes
+              gebunden ist. Der Schlüssel wird dabei verbraucht — du bekommst sofort einen neuen.
+            </span>
+          </div>
+        )}
+
         {error && (
           <div className="alert" role="alert" style={{ marginBottom: 14 }}>
             {error}
@@ -167,8 +193,23 @@ export default function Login({ onAuthenticated }: Props) {
 
         <button className="btn" type="submit" disabled={!canSubmit || busy}>
           {busy && <span className="spinner" aria-hidden="true" />}
-          {mode === 'create' ? 'Reise anlegen' : 'Beitreten'}
+          {mode === 'create' ? 'Reise anlegen' : recovering ? 'Zugang wiederherstellen' : 'Beitreten'}
         </button>
+
+        {mode === 'join' && (
+          <button
+            type="button"
+            className="btn secondary"
+            style={{ marginTop: 8 }}
+            onClick={() => {
+              setRecovering((on) => !on);
+              setRecoveryKey('');
+              setError(null);
+            }}
+          >
+            {recovering ? 'Zurück zum normalen Beitreten' : 'Neues Handy? Zugang wiederherstellen'}
+          </button>
+        )}
       </form>
     </div>
   );

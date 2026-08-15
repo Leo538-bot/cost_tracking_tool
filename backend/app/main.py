@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 from .config import settings
 from .database import Base, engine
@@ -16,11 +16,36 @@ logger = logging.getLogger("tripcost")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
+def _add_missing_columns() -> None:
+    """Bring an existing database up to date.
+
+    create_all() only creates missing tables, never missing columns, so a trip
+    started before the recovery key existed would break on login. Both columns are
+    nullable, so adding them is safe and needs no downtime.
+    """
+    additions = {
+        "recovery_key_hash": "VARCHAR(255)",
+        "recovery_key_set_at": "TIMESTAMP WITH TIME ZONE",
+    }
+    inspector = inspect(engine)
+    if "groups" not in inspector.get_table_names():
+        return
+
+    existing = {column["name"] for column in inspector.get_columns("groups")}
+    for name, ddl_type in additions.items():
+        if name in existing:
+            continue
+        logger.info("Adding missing column groups.%s", name)
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE groups ADD COLUMN {name} {ddl_type}"))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
     # The schema is small and additive; create_all keeps the compose file to one command.
     Base.metadata.create_all(bind=engine)
+    _add_missing_columns()
     logger.info("TripCost API ready (uploads at %s)", settings.upload_dir)
     yield
 

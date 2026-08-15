@@ -630,5 +630,233 @@ class TestAdmin:
         assert old.status_code == 401
 
 
+class TestRecoveryKey:
+    """The emergency key: the way back in when the admin's own phone is gone."""
+
+    def test_key_is_issued_once_at_creation(self, client):
+        session = make_group(client)
+        key = session["recovery_key"]
+        assert key and len(key.replace("-", "")) == 16
+
+        # It is never handed out again, not even to the admin's own session.
+        assert client.get("/api/auth/me", headers=auth_header(session)).json()[
+            "recovery_key"
+        ] is None
+
+    def test_admin_locked_out_recovers_name_and_admin_rights(self, client):
+        admin = make_group(client)
+        slug, key = admin["group"]["slug"], admin["recovery_key"]
+        admin_id = admin["member"]["id"]
+
+        client.post(
+            "/api/expenses",
+            headers=auth_header(admin),
+            json={
+                "description": "Fähre",
+                "amount_cents": 8000,
+                "payer_id": admin_id,
+                "expense_date": str(date.today()),
+                "split_type": "equal",
+                "participant_ids": [admin_id],
+            },
+        )
+
+        # Leo's phone is gone: no device id, and nobody else can release his name.
+        blocked = client.post(
+            "/api/auth/login",
+            json={"group_slug": slug, "password": "sommer2026!", "display_name": "Leo"},
+        )
+        assert blocked.status_code == 409
+
+        recovered = client.post(
+            "/api/auth/login",
+            json={
+                "group_slug": slug,
+                "password": "sommer2026!",
+                "display_name": "Leo",
+                "recovery_key": key,
+            },
+        )
+        assert recovered.status_code == 200
+        body = recovered.json()
+        assert body["member"]["id"] == admin_id
+        assert body["member"]["is_admin"] is True
+
+        # The trip is intact and the new phone can act as admin.
+        assert client.get("/api/balances", headers=auth_header(body)).json()[
+            "total_spent_cents"
+        ] == 8000
+        assert (
+            client.post("/api/admin/password", headers=auth_header(body), json={"new_password": "neu-2026!"}).status_code
+            == 204
+        )
+
+    def test_used_key_cannot_be_replayed(self, client):
+        admin = make_group(client)
+        slug, key = admin["group"]["slug"], admin["recovery_key"]
+
+        first = client.post(
+            "/api/auth/login",
+            json={
+                "group_slug": slug,
+                "password": "sommer2026!",
+                "display_name": "Leo",
+                "recovery_key": key,
+            },
+        ).json()
+        # A fresh key is handed out in the same response...
+        assert first["recovery_key"] and first["recovery_key"] != key
+
+        # ...and the old one is dead.
+        replay = client.post(
+            "/api/auth/login",
+            json={
+                "group_slug": slug,
+                "password": "sommer2026!",
+                "display_name": "Leo",
+                "recovery_key": key,
+            },
+        )
+        assert replay.status_code == 401
+
+        # The newly issued one works.
+        assert (
+            client.post(
+                "/api/auth/login",
+                json={
+                    "group_slug": slug,
+                    "password": "sommer2026!",
+                    "display_name": "Leo",
+                    "recovery_key": first["recovery_key"],
+                },
+            ).status_code
+            == 200
+        )
+
+    def test_key_is_accepted_in_any_writing(self, client):
+        admin = make_group(client)
+        slug, key = admin["group"]["slug"], admin["recovery_key"]
+        sloppy = f"  {key.replace('-', '').lower()}  "
+
+        response = client.post(
+            "/api/auth/login",
+            json={
+                "group_slug": slug,
+                "password": "sommer2026!",
+                "display_name": "Leo",
+                "recovery_key": sloppy,
+            },
+        )
+        assert response.status_code == 200
+
+    def test_key_alone_is_not_enough_without_the_group_password(self, client):
+        admin = make_group(client)
+        response = client.post(
+            "/api/auth/login",
+            json={
+                "group_slug": admin["group"]["slug"],
+                "password": "falsch",
+                "display_name": "Leo",
+                "recovery_key": admin["recovery_key"],
+            },
+        )
+        assert response.status_code == 401
+
+    def test_key_of_another_trip_does_not_work(self, client):
+        admin = make_group(client)
+        other = make_group(client, name="Andere Reise", admin="Fremd")
+        response = client.post(
+            "/api/auth/login",
+            json={
+                "group_slug": admin["group"]["slug"],
+                "password": "sommer2026!",
+                "display_name": "Leo",
+                "recovery_key": other["recovery_key"],
+            },
+        )
+        assert response.status_code == 401
+
+    def test_key_cannot_invent_a_new_member(self, client):
+        admin = make_group(client)
+        response = client.post(
+            "/api/auth/login",
+            json={
+                "group_slug": admin["group"]["slug"],
+                "password": "sommer2026!",
+                "display_name": "Wildfremd",
+                "recovery_key": admin["recovery_key"],
+            },
+        )
+        assert response.status_code == 404
+
+    def test_recovery_attempts_are_tightly_rate_limited(self, client):
+        admin = make_group(client)
+        slug = admin["group"]["slug"]
+        codes = [
+            client.post(
+                "/api/auth/login",
+                json={
+                    "group_slug": slug,
+                    "password": "sommer2026!",
+                    "display_name": "Leo",
+                    "recovery_key": "AAAA-BBBB-CCCC-DDDD",
+                },
+            ).status_code
+            for _ in range(7)
+        ]
+        # Far stricter than the 10 ordinary password attempts.
+        assert codes.count(429) >= 1
+        assert codes.index(429) <= 5
+
+    def test_admin_can_issue_a_replacement_key(self, client):
+        admin = make_group(client)
+        slug, old = admin["group"]["slug"], admin["recovery_key"]
+
+        fresh = client.post("/api/admin/recovery-key", headers=auth_header(admin))
+        assert fresh.status_code == 200
+        new_key = fresh.json()["recovery_key"]
+        assert new_key != old
+
+        assert (
+            client.post(
+                "/api/auth/login",
+                json={
+                    "group_slug": slug,
+                    "password": "sommer2026!",
+                    "display_name": "Leo",
+                    "recovery_key": old,
+                },
+            ).status_code
+            == 401
+        )
+
+    def test_only_admin_may_issue_a_replacement_key(self, client):
+        admin = make_group(client)
+        anna = client.post(
+            "/api/auth/login",
+            json={
+                "group_slug": admin["group"]["slug"],
+                "password": "sommer2026!",
+                "display_name": "Anna",
+            },
+        ).json()
+        assert client.post("/api/admin/recovery-key", headers=auth_header(anna)).status_code == 403
+
+    def test_recovery_is_recorded_in_the_audit_log(self, client):
+        admin = make_group(client)
+        recovered = client.post(
+            "/api/auth/login",
+            json={
+                "group_slug": admin["group"]["slug"],
+                "password": "sommer2026!",
+                "display_name": "Leo",
+                "recovery_key": admin["recovery_key"],
+            },
+        ).json()
+
+        activity = client.get("/api/activity", headers=auth_header(recovered)).json()
+        assert any(entry["action"] == "member.recover" for entry in activity)
+
+
 def test_health(client):
     assert client.get("/api/health").json()["status"] == "ok"

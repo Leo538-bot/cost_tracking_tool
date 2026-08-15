@@ -64,7 +64,13 @@ dir als Admin.
 
 **Bei verlorenem oder neuem Handy:** Du als Admin gehst auf „Gruppe → Mitglieder"
 und tippst bei der Person auf „Freigeben". Der Name wird frei, das alte Gerät
-verliert den Zugang, und das neue Handy kann sich normal anmelden.
+verliert den Zugang, und das neue Handy kann sich normal anmelden. Die bereits
+eingetragenen Kosten bleiben dabei unverändert — es ist derselbe Mitglieds-
+Datensatz, nur an ein neues Gerät gebunden.
+
+Ist die Sitzung nur abgelaufen und das Handy noch dasselbe, braucht es gar
+nichts: die Geräte-Kennung überlebt das Abmelden, die Person meldet sich einfach
+wieder an.
 
 **Wenn jemand die Gruppe verlässt:** Unter „Gruppe → Gruppen-Passwort ändern"
 setzt du ein neues Passwort. Alle bereits angemeldeten Handys bleiben angemeldet
@@ -72,6 +78,39 @@ setzt du ein neues Passwort. Alle bereits angemeldeten Handys bleiben angemeldet
 
 Falsche Passwörter sind auf 10 Versuche pro Viertelstunde und IP begrenzt, damit
 das Passwort nicht durchprobiert werden kann.
+
+### Der Notfall-Schlüssel
+
+Alles oben setzt voraus, dass ein Admin erreichbar ist. Wenn **dir** das Handy
+abhandenkommt, kann dich niemand freigeben — dafür gibt es den Notfall-Schlüssel.
+
+Beim Anlegen der Reise wird er einmalig angezeigt, in der Form
+`R5F9-A4ZH-84TK-VMGH`. Notiere ihn irgendwo außerhalb deines Handys. Er wird nur
+als Hash gespeichert, wir können ihn dir also später nicht noch einmal zeigen.
+
+Wenn du ausgesperrt bist: auf dem Anmelde-Bildschirm „Neues Handy? Zugang
+wiederherstellen" antippen und Name, Gruppen-Passwort **und** Notfall-Schlüssel
+eingeben. Du bist sofort wieder unter deinem Namen drin, mit Admin-Rechten und
+allen Kosten. Groß-/Kleinschreibung und Bindestriche sind egal.
+
+Ein paar Eigenschaften, die dabei wichtig sind:
+
+- **Beides nötig.** Der Schlüssel allein reicht nicht, das Gruppen-Passwort muss
+  zusätzlich stimmen.
+- **Einmal gültig.** Nach dem Einsatz ist der alte Schlüssel tot und du bekommst
+  sofort einen neuen angezeigt. Ein Schlüssel, der mal in einem Chat gelandet ist,
+  lässt sich nicht wiederverwenden.
+- **Nur bestehende Namen.** Man kann damit keinen neuen Namen erfinden, nur einen
+  vorhandenen zurückholen.
+- **Streng gedrosselt.** 5 Versuche pro Stunde und IP, statt der 10 pro
+  Viertelstunde beim normalen Passwort.
+- **Sichtbar im Protokoll.** Jede Verwendung steht unter „Letzte Aktivitäten".
+
+Zettel verloren? Unter „Gruppe → Notfall-Schlüssel" erzeugst du einen neuen; der
+alte wird dabei ungültig.
+
+> Der Schlüssel ist stärker als das Gruppen-Passwort — wer ihn hat, kommt als
+> Admin rein. Das Gruppen-Passwort teilst du bewusst, den Notfall-Schlüssel nie.
 
 ---
 
@@ -141,7 +180,7 @@ zufällige Wörter reichen völlig) und nicht den Namen der Reise.
 │   │   ├── storage.py     Bildverarbeitung der Kassenzettel
 │   │   ├── security.py    Passwort-Hashing (bcrypt) und Tokens
 │   │   └── routers/       API-Endpunkte
-│   └── tests/             84 Tests
+│   └── tests/             97 Tests
 └── frontend/              React + TypeScript, mobil zuerst
 ```
 
@@ -149,7 +188,7 @@ zufällige Wörter reichen völlig) und nicht den Namen der Reise.
 
 | Tabelle | Inhalt |
 |---|---|
-| `groups` | eine Reise, mit gehashtem Gruppen-Passwort und Währung |
+| `groups` | eine Reise, mit gehashtem Gruppen-Passwort, Notfall-Schlüssel und Währung |
 | `members` | Teilnehmer, mit Gerätebindung und Admin-Flag |
 | `expenses` | eine Ausgabe: Betrag in Cent, Zahler, Kategorie, Datum |
 | `expense_shares` | wer von einer Ausgabe wie viel trägt |
@@ -180,7 +219,7 @@ docker run --rm -v cost_tracking_tool_receipts:/data -v "$PWD":/out \
 # Backend-Tests
 cd backend
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m pytest -q          # 84 Tests
+.venv/bin/python -m pytest -q          # 97 Tests
 
 # Frontend mit Hot Reload (API muss über Docker laufen)
 cd frontend
@@ -209,7 +248,8 @@ Alles über `.env` (Vorlage: `.env.example`):
 
 ### Sicherheit in Kurzform
 
-- Gruppen-Passwörter liegen als bcrypt-Hash in der Datenbank, nie im Klartext.
+- Gruppen-Passwörter und Notfall-Schlüssel liegen als bcrypt-Hash in der
+  Datenbank, nie im Klartext.
 - Anmelde-Tokens sind an ein Gerät gebunden; „Freigeben" entwertet das alte.
 - Die Datenbank ist nicht nach außen freigegeben, nur die API erreicht sie.
 - Der API-Container läuft als normaler Benutzer, nicht als root.

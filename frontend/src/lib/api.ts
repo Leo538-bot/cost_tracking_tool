@@ -28,6 +28,8 @@ export interface Session {
   device_id: string;
   member: SessionMember;
   group: Group;
+  /** Only present when a key was just issued — on trip creation or after a recovery. */
+  recovery_key: string | null;
 }
 
 export interface Share {
@@ -204,6 +206,7 @@ export const api = {
     password: string;
     display_name: string;
     device_id?: string | null;
+    recovery_key?: string | null;
   }) => request<Session>('/api/auth/login', { method: 'POST', body: JSON.stringify(body) }),
 
   me: () => request<Session>('/api/auth/me'),
@@ -248,6 +251,9 @@ export const api = {
 
   releaseMember: (id: string) =>
     request<void>(`/api/admin/members/${id}/release`, { method: 'POST' }),
+
+  regenerateRecoveryKey: () =>
+    request<{ recovery_key: string }>('/api/admin/recovery-key', { method: 'POST' }),
 
   changePassword: (newPassword: string) =>
     request<void>('/api/admin/password', {

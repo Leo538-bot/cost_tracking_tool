@@ -55,3 +55,30 @@ def decode_access_token(token: str) -> dict:
 
 def new_device_id() -> str:
     return secrets.token_urlsafe(24)
+
+
+# Ambiguous characters are left out so the key can be copied off a handwritten
+# note without 0/O or 1/I/l guesswork.
+_RECOVERY_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+_RECOVERY_GROUPS = 4
+_RECOVERY_GROUP_LEN = 4
+
+
+def generate_recovery_key() -> str:
+    """A one-off emergency key, e.g. 'K7QM-3XPD-9WRT-BFHS' (~79 bits)."""
+    groups = [
+        "".join(secrets.choice(_RECOVERY_ALPHABET) for _ in range(_RECOVERY_GROUP_LEN))
+        for _ in range(_RECOVERY_GROUPS)
+    ]
+    return "-".join(groups)
+
+
+def normalise_recovery_key(raw: str) -> str:
+    """Accept what people actually type: lower case, spaces, missing dashes."""
+    cleaned = "".join(ch for ch in raw.upper() if ch.isalnum())
+    if len(cleaned) != _RECOVERY_GROUPS * _RECOVERY_GROUP_LEN:
+        return cleaned
+    return "-".join(
+        cleaned[i : i + _RECOVERY_GROUP_LEN]
+        for i in range(0, len(cleaned), _RECOVERY_GROUP_LEN)
+    )

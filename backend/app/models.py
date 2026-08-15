@@ -35,6 +35,13 @@ class Group(Base):
     slug: Mapped[str] = mapped_column(String(140), nullable=False, unique=True, index=True)
     # bcrypt hash of the shared group password.
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    # bcrypt hash of the emergency recovery key. Shown to the creator exactly once
+    # and never again -- only its hash lives here. Nullable so a trip created
+    # before this feature existed keeps working until an admin generates one.
+    recovery_key_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    recovery_key_set_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="EUR")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
