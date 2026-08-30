@@ -45,7 +45,11 @@ services:
       api:
         condition: service_healthy
     ports:
-      - '${WEB_PORT:-8080}:80'
+      # Bound to localhost by default: with the tunnel nothing needs to listen on
+      # a public interface, and a published port would be reachable over plain
+      # HTTP at the server's address, bypassing Cloudflare entirely.
+      # For LAN access without a tunnel, set WEB_BIND=0.0.0.0 in .env.
+      - '${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8080}:80'
 
   # Public HTTPS URL without opening a port on your router.
   # Only starts when asked for: docker compose --profile tunnel up -d
@@ -65,6 +69,18 @@ services:
     # Outbound only: cloudflared dials Cloudflare, nothing reaches in from outside.
     networks:
       - default
+
+  # Throwaway tunnel for a quick check: no account, no domain, no token. Prints a
+  # random https://<something>.trycloudflare.com URL in its logs that dies with
+  # the container. For testing only -- use the `tunnel` service above for real.
+  tunnel-quick:
+    image: cloudflare/cloudflared:latest
+    profiles:
+      - tunnel-quick
+    depends_on:
+      web:
+        condition: service_healthy
+    command: tunnel --no-autoupdate --url http://web:80
 
 volumes:
   db_data:

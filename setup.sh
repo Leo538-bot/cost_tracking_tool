@@ -36,8 +36,13 @@ JWT_SECRET=$(random_secret)
 POSTGRES_USER=tripcost
 POSTGRES_DB=tripcost
 
-# Port, unter dem die App im Browser erreichbar ist.
+# Port, unter dem die App erreichbar ist. Frei waehlbar, falls belegt.
 WEB_PORT=8080
+
+# An welche Adresse der Port gebunden wird.
+#   127.0.0.1 = nur lokal auf dem Server (richtig fuer den Cloudflare Tunnel)
+#   0.0.0.0   = auch aus dem LAN erreichbar, ungeschuetzt und ohne HTTPS
+WEB_BIND=127.0.0.1
 
 # Wie lange ein Handy angemeldet bleibt, in Tagen.
 SESSION_DAYS=90

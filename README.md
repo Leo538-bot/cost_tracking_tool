@@ -160,29 +160,94 @@ mit jedem). Rückzahlungen trägst du mit einem Tipp ein.
 
 ## Öffentlich erreichbar machen (Cloudflare Tunnel)
 
-Damit kommen deine Freunde von überall dran, ohne dass du einen Port im Router
-öffnest. Der Tunnel baut die Verbindung von innen nach außen auf.
+Deine Freunde kommen damit von überall dran, ohne dass du einen Port im Router
+öffnest. Der Tunnel baut die Verbindung von innen nach außen auf, HTTPS macht
+Cloudflare.
 
-1. In Cloudflare **Zero Trust → Networks → Tunnels → Create a tunnel** anlegen.
-2. Als Public Hostname deine Domain wählen und als Service **`http://web:80`**
-   eintragen (nicht `localhost` — das ist der Container-Name im Compose-Netz).
-3. Das angezeigte Token in die `.env` schreiben:
+### Erst testen, ohne Domain und ohne Konto
+
+```bash
+docker compose --profile tunnel-quick up -d
+docker compose logs -f tunnel-quick
+```
+
+In den Logs steht eine zufällige Adresse `https://....trycloudflare.com` — die
+funktioniert sofort. Damit prüfst du, ob alles läuft, bevor du DNS anfasst. Die
+Adresse verfällt mit dem Container, also nichts für den Dauerbetrieb.
+
+Beenden mit `docker compose --profile tunnel-quick down`.
+
+### Dauerhaft, mit eigener Domain
+
+Voraussetzung: Eine Domain, die bei Cloudflare liegt (Nameserver zeigen auf
+Cloudflare). Ohne Domain geht nur der Schnelltest oben.
+
+1. Im Cloudflare-Dashboard auf **Networking → Tunnels → Create a tunnel**.
+   (Tunnel sind seit Anfang 2026 im Haupt-Dashboard, nicht mehr nur unter
+   Zero Trust.)
+2. Namen vergeben, **Create Tunnel**. Als Umgebung **Docker** wählen — im
+   angezeigten Befehl steckt dein Token, der lange Wert hinter `--token`.
+3. Token in die `.env` eintragen:
 
    ```
    CLOUDFLARE_TUNNEL_TOKEN=eyJhIjoi...
    ```
 
-4. Starten mit aktiviertem Profil:
+4. Tunnel starten:
 
    ```bash
    docker compose --profile tunnel up -d
    ```
 
-Ohne `--profile tunnel` startet der Tunnel nicht — die App läuft dann nur lokal.
+   Im Dashboard springt der Tunnel jetzt auf **HEALTHY**.
 
-Cloudflare übernimmt dabei HTTPS. Wenn die App öffentlich erreichbar ist, ist das
-Gruppen-Passwort die Hürde nach außen: nimm dann bitte ein längeres (drei, vier
-zufällige Wörter reichen völlig) und nicht den Namen der Reise.
+5. Zurück im Dashboard: Tunnel auswählen, Reiter **Routes** → **Add route** →
+   **Published application**. Subdomain und Domain wählen, und als **Service
+   URL** eintragen:
+
+   ```
+   http://web:80
+   ```
+
+   **Genau so.** Nicht `localhost`, nicht deine Server-IP — `web` ist der
+   Container-Name im Compose-Netz, und nur den erreicht cloudflared. `localhost`
+   wäre aus Sicht des Tunnel-Containers er selbst, und das schlägt fehl.
+
+6. Speichern. Nach ein paar Sekunden ist die App unter deiner Adresse erreichbar.
+
+### Läuft es?
+
+```bash
+docker compose --profile tunnel ps          # tunnel muss "Up" sein
+docker compose --profile tunnel logs tunnel # "Registered tunnel connection"
+curl -I https://deine-subdomain.deine-domain.de
+```
+
+### Ports
+
+Standardmäßig lauscht die App **nur auf localhost** (`WEB_BIND=127.0.0.1`). Das
+ist beim Tunnel genau richtig: cloudflared erreicht `web:80` über das
+Docker-Netz, ein offener Port am Server wäre nur ein zweiter, unverschlüsselter
+Weg an Cloudflare vorbei.
+
+Ist `8080` bei dir belegt, trag in der `.env` einfach einen anderen ein:
+
+```
+WEB_PORT=8090
+```
+
+Wer die App zusätzlich im LAN erreichen will, setzt `WEB_BIND=0.0.0.0` — dann
+aber ohne HTTPS und ohne den Schutz von Cloudflare.
+
+### Wenn es öffentlich steht
+
+- Nimm ein langes Gruppen-Passwort, drei oder vier zufällige Wörter.
+- `DOCS_ENABLED=false` lassen.
+- Den Notfall-Schlüssel weder ins Handy noch in den Gruppenchat.
+
+Optional kannst du in Cloudflare zusätzlich eine WAF-Rate-Limit-Regel auf
+`/api/auth/login` legen. Die App drosselt selbst schon pro Absender-Adresse,
+aber dann filtert Cloudflare den Müll ab, bevor er deinen Server erreicht.
 
 ---
 
