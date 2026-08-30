@@ -15,13 +15,31 @@ Freunde von unterwegs draufkommen.
 git clone <dieses-repo>
 cd cost_tracking_tool
 
-cp .env.example .env
-# Die beiden Pflichtwerte erzeugen:
-echo "POSTGRES_PASSWORD=$(openssl rand -base64 32)" >> .env
-echo "JWT_SECRET=$(openssl rand -base64 32)"        >> .env
-# ... und die Platzhalterzeilen in .env wieder löschen.
-
+./setup.sh                 # legt .env mit frischen Zufallswerten an
 docker compose up -d --build
+```
+
+`setup.sh` erzeugt Datenbank-Passwort und Signaturschlüssel selbst und schreibt
+sie nur für dich lesbar (`chmod 600`) in `.env`. Eine bereits vorhandene `.env`
+rührt es nicht an.
+
+**Kein `sudo` davorsetzen.** Wenn du eine Rechte-Fehlermeldung bekommst, gehört
+das Verzeichnis nicht dir — das behebst du einmalig mit:
+
+```bash
+sudo chown -R "$USER":"$USER" .
+```
+
+Der Grund: Bei `sudo echo "..." >> .env` schreibt nicht `sudo`, sondern deine
+eigene Shell in die Datei. Das `>>` wird ausgewertet, bevor `sudo` überhaupt
+startet — die erhöhten Rechte gelten also nur für `echo` und helfen nicht.
+
+Wer die Werte lieber von Hand setzt, nimmt `.env.example` als Vorlage:
+
+```bash
+cp .env.example .env
+# POSTGRES_PASSWORD und JWT_SECRET eintragen, z. B. je einmal:
+openssl rand -base64 32
 ```
 
 Danach im Browser: **http://localhost:8080**
@@ -172,6 +190,7 @@ zufällige Wörter reichen völlig) und nicht den Namen der Reise.
 
 ```
 ├── docker-compose.yml     db + api + web (+ optional tunnel)
+├── setup.sh               legt die .env mit Zufallswerten an
 ├── .env.example           Vorlage für die Konfiguration
 ├── backend/               FastAPI + SQLAlchemy + Pillow
 │   ├── app/
