@@ -27,9 +27,37 @@ class Settings(BaseSettings):
 
     cors_origins: str = "http://localhost:5173,http://localhost:8080"
 
+    # Header carrying the real visitor address, set by the reverse proxy. Only
+    # trustworthy because the API port is never published -- nginx is the sole
+    # peer that can reach it. Set to "" to fall back to the socket address.
+    client_ip_header: str = "x-real-ip"
+
+    # The interactive API docs list every endpoint and schema. Handy locally,
+    # needless exposure once the app is reachable from the internet.
+    docs_enabled: bool = False
+
+    # Anything shorter is brute-forcible, and PyJWT itself warns below 32 bytes.
+    min_jwt_secret_length: int = 32
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    def validate_secrets(self) -> list[str]:
+        """Report configuration that would make the deployment forgeable."""
+        problems = []
+        if self.jwt_secret == Settings.model_fields["jwt_secret"].default:
+            problems.append(
+                "JWT_SECRET is still the built-in default. Anyone who reads the "
+                "source can mint valid sessions. Set it to a random value, e.g. "
+                "`openssl rand -base64 32`."
+            )
+        elif len(self.jwt_secret.encode()) < self.min_jwt_secret_length:
+            problems.append(
+                f"JWT_SECRET is only {len(self.jwt_secret.encode())} bytes; "
+                f"at least {self.min_jwt_secret_length} are required."
+            )
+        return problems
 
 
 @lru_cache

@@ -42,6 +42,14 @@ def _add_missing_columns() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Refuse to serve with a forgeable signing key rather than looking healthy
+    # while every session token can be minted by anyone who read the source.
+    problems = settings.validate_secrets()
+    if problems:
+        for problem in problems:
+            logger.critical("Unsafe configuration: %s", problem)
+        raise RuntimeError("; ".join(problems))
+
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
     # The schema is small and additive; create_all keeps the compose file to one command.
     Base.metadata.create_all(bind=engine)
@@ -55,6 +63,10 @@ app = FastAPI(
     description="Gemeinsame Urlaubskosten erfassen, Kassenzettel ablegen, Schulden ausgleichen.",
     version="1.0.0",
     lifespan=lifespan,
+    # Off by default: the schema maps the whole attack surface for a scanner.
+    docs_url="/docs" if settings.docs_enabled else None,
+    redoc_url="/redoc" if settings.docs_enabled else None,
+    openapi_url="/openapi.json" if settings.docs_enabled else None,
 )
 
 app.add_middleware(

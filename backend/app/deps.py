@@ -9,6 +9,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .config import settings
 from .database import get_db
 from .models import AuditLog, Group, Member
 from .security import constant_time_equals, decode_access_token
@@ -20,6 +21,23 @@ CREDENTIALS_ERROR = HTTPException(
     detail="Nicht angemeldet oder Sitzung abgelaufen.",
     headers={"WWW-Authenticate": "Bearer"},
 )
+
+
+def client_ip(request: Request) -> str:
+    """The visitor's address, as reported by the reverse proxy.
+
+    The proxy overwrites this header on every request, and the API port is not
+    published, so a caller cannot spoof it by sending one. If the header is
+    unset -- running the API directly, say -- fall back to the socket peer.
+    """
+    if settings.client_ip_header:
+        forwarded = request.headers.get(settings.client_ip_header)
+        if forwarded:
+            # Take the first entry: proxies append, so the client is leftmost.
+            candidate = forwarded.split(",")[0].strip()
+            if candidate:
+                return candidate[:45]
+    return request.client.host if request.client else "unknown"
 
 
 @dataclass
@@ -108,6 +126,6 @@ def write_audit(
             entity_id=entity_id,
             summary=summary,
             device_id=user.device_id,
-            ip_address=request.client.host if request.client else None,
+            ip_address=client_ip(request),
         )
     )

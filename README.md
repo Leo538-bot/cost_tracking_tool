@@ -180,7 +180,7 @@ zufällige Wörter reichen völlig) und nicht den Namen der Reise.
 │   │   ├── storage.py     Bildverarbeitung der Kassenzettel
 │   │   ├── security.py    Passwort-Hashing (bcrypt) und Tokens
 │   │   └── routers/       API-Endpunkte
-│   └── tests/             97 Tests
+│   └── tests/             104 Tests
 └── frontend/              React + TypeScript, mobil zuerst
 ```
 
@@ -219,7 +219,7 @@ docker run --rm -v cost_tracking_tool_receipts:/data -v "$PWD":/out \
 # Backend-Tests
 cd backend
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m pytest -q          # 97 Tests
+.venv/bin/python -m pytest -q          # 104 Tests
 
 # Frontend mit Hot Reload (API muss über Docker laufen)
 cd frontend
@@ -227,7 +227,10 @@ npm install
 npm run dev                            # http://localhost:5173
 ```
 
-Die API-Dokumentation erzeugt FastAPI selbst: http://localhost:8080/docs
+Die API-Doku ist standardmäßig **aus**, weil sie einem Scanner sämtliche
+Endpunkte auflistet. Zum Entwickeln in der `.env` `DOCS_ENABLED=true` setzen —
+erreichbar ist sie dann direkt an der API, nicht über Port 8080 (nginx leitet
+dorthin nur `/api/` weiter).
 
 ---
 
@@ -246,12 +249,54 @@ Alles über `.env` (Vorlage: `.env.example`):
 
 Änderst du `JWT_SECRET` nachträglich, müssen sich alle einmal neu anmelden.
 
-### Sicherheit in Kurzform
+## Sicherheit
 
+Der Stack wurde gegen einen Angriffskatalog geprüft — Auth-Umgehung, fremde
+Datenzugriffe, Einschleusung, bösartige Uploads, offene Ports. Was eingebaut ist:
+
+**Anmeldung und Sitzungen**
 - Gruppen-Passwörter und Notfall-Schlüssel liegen als bcrypt-Hash in der
   Datenbank, nie im Klartext.
-- Anmelde-Tokens sind an ein Gerät gebunden; „Freigeben" entwertet das alte.
-- Die Datenbank ist nicht nach außen freigegeben, nur die API erreicht sie.
+- Anmelde-Tokens sind signiert und an ein Gerät gebunden; „Freigeben" entwertet
+  das alte sofort. Manipulierte Tokens und der `alg=none`-Trick werden abgewiesen.
+- Die App **startet nicht**, wenn `JWT_SECRET` fehlt, noch der eingebaute
+  Standard ist oder unter 32 Zeichen liegt — sonst könnte jeder Sitzungen fälschen.
+- Anmeldeversuche sind pro Absender-Adresse begrenzt (10 pro Viertelstunde,
+  5 pro Stunde für den Notfall-Schlüssel). Ein Angreifer sperrt damit nur sich
+  selbst aus, nicht die Gruppe.
+
+**Daten**
+- Jede Anfrage ist auf die eigene Reise beschränkt. Fremde IDs liefern 404 —
+  auch für Ausgaben, Belege, Rückzahlungen und Mitglieder.
+- Alle Datenbankzugriffe laufen über das ORM, ohne zusammengebaute SQL-Strings.
+- Fehlermeldungen beim Login unterscheiden nicht zwischen „Reise gibt es nicht"
+  und „Passwort falsch", damit sich keine Reisen aufspüren lassen.
+
+**Uploads**
+- Bilder werden aus rohen Pixeln neu kodiert, nicht durchgereicht. Getarnte
+  Skripte, SVGs und Nicht-Bilder werden abgelehnt, EXIF/GPS fällt weg.
+- Größe (12 MB) und Pixelzahl sind begrenzt, gegen Dekomprimierungs-Bomben.
+- Dateinamen kommen vom Server, nie vom Client.
+
+**Betrieb**
+- Datenbank und API sind nicht nach außen freigegeben; nur nginx ist erreichbar.
 - Der API-Container läuft als normaler Benutzer, nicht als root.
-- Uploads werden neu kodiert statt durchgereicht — was kein Bild ist, fliegt raus.
-- Jede Anfrage ist auf die eigene Reise beschränkt; fremde IDs werden abgewiesen.
+- Sicherheits-Header inklusive Content-Security-Policy, die externe Skripte
+  komplett ausschließt; nginx nennt seine Version nicht.
+- Abhängigkeiten sind auf dem Stand ohne bekannte Schwachstellen
+  (`pip-audit` und `npm audit` sauber).
+
+**Prüf das selbst nach:**
+
+```bash
+cd backend && .venv/bin/pip install pip-audit && .venv/bin/pip-audit
+cd frontend && npm audit --omit=dev
+```
+
+### Wenn die App öffentlich erreichbar ist
+
+- Nimm ein langes Gruppen-Passwort — drei, vier zufällige Wörter.
+- Lass `DOCS_ENABLED=false`.
+- Halte die Abhängigkeiten aktuell; ein `docker compose build --pull` alle paar
+  Monate genügt für eine Urlaubsgruppe.
+- Der Notfall-Schlüssel gehört nicht ins Handy und nicht in den Gruppenchat.

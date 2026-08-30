@@ -45,6 +45,8 @@ def client(tmp_path, monkeypatch):
 
     settings.upload_dir = tmp_path / "receipts"
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
+    # The app refuses to start on the built-in key, so give the tests a real one.
+    settings.jwt_secret = "test-secret-that-is-long-enough-for-hs256-abc"
 
     engine = create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
@@ -856,6 +858,86 @@ class TestRecoveryKey:
 
         activity = client.get("/api/activity", headers=auth_header(recovered)).json()
         assert any(entry["action"] == "member.recover" for entry in activity)
+
+
+class TestHardening:
+    def test_startup_refuses_the_built_in_signing_key(self):
+        from app.config import Settings, settings as live
+
+        before = live.jwt_secret
+        try:
+            live.jwt_secret = Settings.model_fields["jwt_secret"].default
+            problems = live.validate_secrets()
+            assert problems and "JWT_SECRET" in problems[0]
+        finally:
+            live.jwt_secret = before
+
+    def test_startup_refuses_a_short_signing_key(self):
+        from app.config import settings as live
+
+        before = live.jwt_secret
+        try:
+            live.jwt_secret = "kurz"
+            assert live.validate_secrets()
+        finally:
+            live.jwt_secret = before
+
+    def test_a_strong_key_passes(self):
+        from app.config import settings as live
+
+        assert live.validate_secrets() == []
+
+    def test_api_schema_is_not_public(self, client):
+        # The docs map every endpoint; they stay off unless explicitly enabled.
+        assert client.get("/openapi.json").status_code == 404
+        assert client.get("/docs").status_code == 404
+
+    def test_client_ip_prefers_the_proxy_header(self, client):
+        from fastapi import Request
+
+        from app.deps import client_ip
+
+        scope = {
+            "type": "http",
+            "headers": [(b"x-real-ip", b"203.0.113.9")],
+            "client": ("172.18.0.4", 1234),
+        }
+        assert client_ip(Request(scope)) == "203.0.113.9"
+
+    def test_client_ip_falls_back_to_the_socket(self, client):
+        from fastapi import Request
+
+        from app.deps import client_ip
+
+        scope = {"type": "http", "headers": [], "client": ("198.51.100.7", 1234)}
+        assert client_ip(Request(scope)) == "198.51.100.7"
+
+    def test_rate_limit_is_per_address_not_global(self, client):
+        """One noisy visitor must not lock the rest of the group out."""
+        group = make_group(client)
+        slug = group["group"]["slug"]
+
+        for _ in range(12):
+            client.post(
+                "/api/auth/login",
+                headers={"X-Real-IP": "203.0.113.1"},
+                json={"group_slug": slug, "password": "falsch", "display_name": "Anna"},
+            )
+
+        blocked = client.post(
+            "/api/auth/login",
+            headers={"X-Real-IP": "203.0.113.1"},
+            json={"group_slug": slug, "password": "sommer2026!", "display_name": "Anna"},
+        )
+        assert blocked.status_code == 429
+
+        # A different visitor is unaffected.
+        other = client.post(
+            "/api/auth/login",
+            headers={"X-Real-IP": "203.0.113.2"},
+            json={"group_slug": slug, "password": "sommer2026!", "display_name": "Ben"},
+        )
+        assert other.status_code == 200
 
 
 def test_health(client):

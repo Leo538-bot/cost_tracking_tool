@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from .. import rate_limit
 from ..database import get_db
-from ..deps import CurrentUser, get_current_user
+from ..deps import CurrentUser, client_ip, get_current_user
 from ..models import AuditLog, Group, Member
 from ..schemas import AuthResponse, GroupCreate, GroupOut, LoginRequest, MemberOut
 from ..security import (
@@ -96,7 +96,7 @@ def create_group(payload: GroupCreate, request: Request, db: Session = Depends(g
             entity_id=group.id,
             summary=f"Gruppe '{group.name}' angelegt",
             device_id=device_id,
-            ip_address=request.client.host if request.client else None,
+            ip_address=client_ip(request),
         )
     )
     db.commit()
@@ -120,8 +120,8 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
     A name belongs to the first device that claims it. Returning devices send the
     device_id they were given; anyone else asking for that name is refused.
     """
-    client_ip = request.client.host if request.client else "unknown"
-    limiter_key = f"{client_ip}:{payload.group_slug}"
+    caller_ip = client_ip(request)
+    limiter_key = f"{caller_ip}:{payload.group_slug}"
     using_recovery = bool(payload.recovery_key and payload.recovery_key.strip())
 
     if using_recovery:
@@ -242,7 +242,7 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
             entity_id=member.id,
             summary=summary,
             device_id=device_id,
-            ip_address=client_ip,
+            ip_address=caller_ip,
         )
     )
     db.commit()

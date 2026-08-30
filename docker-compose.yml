@@ -29,6 +29,10 @@ services:
       SESSION_DAYS: ${SESSION_DAYS:-90}
       UPLOAD_DIR: /data/receipts
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+      # nginx overwrites this header per request, so it cannot be spoofed from outside.
+      CLIENT_IP_HEADER: x-real-ip
+      # Interactive API docs. Keep off on anything reachable from the internet.
+      DOCS_ENABLED: ${DOCS_ENABLED:-false}
     volumes:
       - receipts:/data/receipts
     expose:
