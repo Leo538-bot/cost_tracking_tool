@@ -205,13 +205,23 @@ Cloudflare). Ohne Domain geht nur der Schnelltest oben.
 1. Im Cloudflare-Dashboard auf **Networking → Tunnels → Create a tunnel**.
    (Tunnel sind seit Anfang 2026 im Haupt-Dashboard, nicht mehr nur unter
    Zero Trust.)
-2. Namen vergeben, **Create Tunnel**. Als Umgebung **Docker** wählen — im
-   angezeigten Befehl steckt dein Token, der lange Wert hinter `--token`.
-3. Token in die `.env` eintragen:
+2. Namen vergeben, **Create Tunnel**. Als Umgebung **Docker** wählen. Im
+   angezeigten Installationsbefehl steckt der Token — der lange Wert hinter
+   `--token`. Nur den kopieren, ohne `--token` davor.
+
+   > **Nicht die Tunnel-ID nehmen.** Im Dashboard steht auch eine ID in der Form
+   > `6ff42ae2-765d-4adf-8112-31c55c1551ef`. Die ist hier falsch; cloudflared
+   > antwortet damit mit `Provided Tunnel token is not valid.` Der richtige Wert
+   > ist deutlich länger (~150 Zeichen) und beginnt mit `eyJ`.
+
+3. Token in die `.env` eintragen — die Zeile steht dort schon leer bereit:
 
    ```
    CLOUDFLARE_TUNNEL_TOKEN=eyJhIjoi...
    ```
+
+   Token verlegt? Im Dashboard beim Tunnel unter **Overview → Refresh token**
+   gibt es einen neuen; der alte verfällt dabei.
 
 4. Tunnel starten:
 
