@@ -160,28 +160,40 @@ fi
 
 say "5/5  Warten, bis die App antwortet"
 
-DEADLINE=$(( $(date +%s) + 180 ))
-while :; do
-    STATUS="$(docker inspect --format '{{.State.Health.Status}}' \
-        "$($DC ps -q api 2>/dev/null)" 2>/dev/null || echo starting)"
-
-    case "$STATUS" in
-        healthy) ok "API läuft"; break ;;
-        unhealthy)
+wait_healthy() {
+    local svc="$1" deadline=$(( $(date +%s) + 180 )) cid status
+    while :; do
+        cid="$($DC ps -q "$svc" 2>/dev/null || true)"
+        if [ -z "$cid" ]; then
             printf '\n'
-            $DC logs --tail 25 api
-            die "Die API ist nicht hochgekommen -- Logs siehe oben."
-            ;;
-    esac
+            $DC logs --tail 30 "$svc" 2>/dev/null || true
+            die "Der Container '$svc' läuft nicht -- Logs siehe oben."
+        fi
 
-    if [ "$(date +%s)" -ge "$DEADLINE" ]; then
-        printf '\n'
-        $DC logs --tail 25 api
-        die "Zeitüberschreitung nach 3 Minuten. Logs siehe oben."
-    fi
-    printf '.'
-    sleep 3
-done
+        status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || echo starting)"
+        case "$status" in
+            healthy|none) ok "$svc läuft"; return 0 ;;
+            unhealthy)
+                printf '\n'
+                # Die Logs des Dienstes sagen fast immer direkt, was fehlt.
+                $DC logs --tail 30 "$svc"
+                die "'$svc' ist nicht gesund geworden -- Logs siehe oben."
+                ;;
+        esac
+
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            printf '\n'
+            $DC logs --tail 30 "$svc"
+            die "Zeitüberschreitung beim Warten auf '$svc'. Logs siehe oben."
+        fi
+        printf '.'
+        sleep 3
+    done
+}
+
+# Beide prüfen: eine gesunde API nützt nichts, wenn nginx davor nicht läuft.
+wait_healthy api
+wait_healthy web
 
 if command -v curl >/dev/null 2>&1; then
     CODE="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$WEB_PORT/" || echo 000)"

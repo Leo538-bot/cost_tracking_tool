@@ -56,6 +56,21 @@ sudo systemctl start docker
 sudo usermod -aG docker "$USER"   # danach einmal ab- und wieder anmelden
 ```
 
+**„container ... is unhealthy".** Lass dir sagen, woran es liegt:
+
+```bash
+docker compose logs web
+docker compose logs api
+```
+
+Nach einem `git pull` sind die Images veraltet — dann hilft ein sauberer
+Neubau:
+
+```bash
+docker compose down
+./start.sh
+```
+
 **Der Frontend-Build bricht ab.** Auf kleinen Servern fehlt beim Bauen
 schlicht der Arbeitsspeicher; das Bauen braucht kurzzeitig rund 1 GB. Prüf mit
 `free -m` und leg bei Bedarf Swap an:
