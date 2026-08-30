@@ -14,41 +14,61 @@ Freunde von unterwegs draufkommen.
 ```bash
 git clone <dieses-repo>
 cd cost_tracking_tool
-
-./setup.sh                 # legt .env mit frischen Zufallswerten an
-docker compose up -d --build
+./start.sh
 ```
 
-`setup.sh` erzeugt Datenbank-Passwort und Signaturschlüssel selbst und schreibt
-sie nur für dich lesbar (`chmod 600`) in `.env`. Eine bereits vorhandene `.env`
-rührt es nicht an.
+Das war's. Das Skript prüft die Voraussetzungen, legt beim ersten Mal eine
+`.env` mit frisch gewürfelten Geheimnissen an, sucht sich einen freien Port,
+baut die Images und wartet, bis die App wirklich antwortet. Am Ende steht die
+Adresse da, unter der du sie erreichst.
 
-**Kein `sudo` davorsetzen.** Wenn du eine Rechte-Fehlermeldung bekommst, gehört
-das Verzeichnis nicht dir — das behebst du einmalig mit:
+Ein zweiter Aufruf ist ungefährlich: eine vorhandene `.env` bleibt unangetastet,
+die App wird nur neu gebaut und aktualisiert.
+
+```bash
+docker compose down      # stoppen, Daten bleiben erhalten
+docker compose logs -f   # zuschauen
+docker compose down -v   # stoppen UND alle Daten löschen
+```
+
+Wer lieber selbst Hand anlegt, nimmt `.env.example` als Vorlage und startet mit
+`docker compose up -d --build`.
+
+### Wenn etwas klemmt
+
+`./start.sh` erklärt die meisten Fälle schon selbst. Die drei häufigsten:
+
+**„Permission denied" beim Schreiben.** Das Verzeichnis gehört nicht dir:
 
 ```bash
 sudo chown -R "$USER":"$USER" .
 ```
 
-Der Grund: Bei `sudo echo "..." >> .env` schreibt nicht `sudo`, sondern deine
-eigene Shell in die Datei. Das `>>` wird ausgewertet, bevor `sudo` überhaupt
-startet — die erhöhten Rechte gelten also nur für `echo` und helfen nicht.
+Setz kein `sudo` vor `./start.sh`. Bei `sudo befehl > datei` schreibt nicht
+`sudo`, sondern deine eigene Shell in die Datei — die Umleitung wird ausgewertet,
+bevor `sudo` überhaupt startet. Die erhöhten Rechte helfen also nicht.
 
-Wer die Werte lieber von Hand setzt, nimmt `.env.example` als Vorlage:
+**„Cannot connect to the Docker daemon".** Entweder läuft er nicht, oder dein
+Benutzer darf ihn nicht ansprechen:
 
 ```bash
-cp .env.example .env
-# POSTGRES_PASSWORD und JWT_SECRET eintragen, z. B. je einmal:
-openssl rand -base64 32
+sudo systemctl start docker
+sudo usermod -aG docker "$USER"   # danach einmal ab- und wieder anmelden
 ```
 
-Danach im Browser: **http://localhost:8080**
+**Der Frontend-Build bricht ab.** Auf kleinen Servern fehlt beim Bauen
+schlicht der Arbeitsspeicher; das Bauen braucht kurzzeitig rund 1 GB. Prüf mit
+`free -m` und leg bei Bedarf Swap an:
 
-Auf „Neue Reise" tippen, Name und Gruppen-Passwort festlegen — fertig. Du bist
-Admin dieser Reise.
+```bash
+sudo fallocate -l 2G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+```
 
-Stoppen mit `docker compose down`. Die Daten bleiben in den Volumes
-(`docker compose down -v` löscht sie wirklich).
+Danach `./start.sh` erneut. (Dauerhaft wird der Swap mit einem Eintrag
+`/swapfile none swap sw 0 0` in `/etc/fstab`.)
 
 ---
 
@@ -255,7 +275,7 @@ aber dann filtert Cloudflare den Müll ab, bevor er deinen Server erreicht.
 
 ```
 ├── docker-compose.yml     db + api + web (+ optional tunnel)
-├── setup.sh               legt die .env mit Zufallswerten an
+├── start.sh               ein Kommando: .env anlegen, bauen, starten
 ├── .env.example           Vorlage für die Konfiguration
 ├── backend/               FastAPI + SQLAlchemy + Pillow
 │   ├── app/
