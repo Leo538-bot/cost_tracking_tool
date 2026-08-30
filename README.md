@@ -56,19 +56,27 @@ sudo systemctl start docker
 sudo usermod -aG docker "$USER"   # danach einmal ab- und wieder anmelden
 ```
 
-**„container ... is unhealthy".** Lass dir sagen, woran es liegt:
+**„container ... is unhealthy" oder „dependency failed to start".** Fast immer
+ein Container aus einem früheren Versuch, der noch mit dem alten Image
+herumliegt. `./start.sh` räumt solche Reste selbst weg — ein `docker compose
+up -d` ohne `--build` dagegen benutzt genau das alte Image weiter. Also:
+
+```bash
+./start.sh
+```
+
+Hilft das nicht, alles wegwerfen und ohne Cache neu bauen (die Daten in den
+Volumes bleiben erhalten):
+
+```bash
+./start.sh --fresh
+```
+
+Und wenn du sehen willst, was der Dienst selbst sagt:
 
 ```bash
 docker compose logs web
 docker compose logs api
-```
-
-Nach einem `git pull` sind die Images veraltet — dann hilft ein sauberer
-Neubau:
-
-```bash
-docker compose down
-./start.sh
 ```
 
 **Der Frontend-Build bricht ab.** Auf kleinen Servern fehlt beim Bauen

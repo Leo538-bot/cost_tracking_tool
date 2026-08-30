@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # Startet TripCost. Ein Kommando, alles inklusive:
-#   ./start.sh
+#   ./start.sh            normal starten bzw. aktualisieren
+#   ./start.sh --fresh    Container wegwerfen und ohne Cache neu bauen
+#                         (Daten in den Volumes bleiben erhalten)
 #
 # Legt beim ersten Mal die .env mit Zufallswerten an, sucht einen freien Port,
 # baut die Images und wartet, bis die App wirklich antwortet.
 set -euo pipefail
 
 cd "$(dirname "$0")"
+
+FRESH=0
+[ "${1:-}" = "--fresh" ] && FRESH=1
 
 say()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
@@ -142,6 +147,37 @@ fi
 
 say "4/5  Images bauen und starten (beim ersten Mal dauert das ein paar Minuten)"
 
+if [ "$FRESH" -eq 1 ]; then
+    warn "--fresh: Container werden entfernt und ohne Cache neu gebaut"
+    $DC down --remove-orphans >/dev/null 2>&1 || true
+    $DC build --no-cache || die "Neubau fehlgeschlagen -- Meldung siehe oben."
+else
+    # Reste eines misslungenen Laufs wegräumen. Wichtig: ein Dienst, der beim
+    # Start abbricht (nginx bei nicht auflösbarem Upstream etwa), landet auf
+    # "exited" und nie auf "unhealthy" -- beide Fälle müssen weg, sonst bleibt
+    # der alte Container liegen und meldet denselben Fehler weiter.
+    for svc in web api db; do
+        cid="$($DC ps -aq "$svc" 2>/dev/null || true)"
+        [ -n "$cid" ] || continue
+        running="$(docker inspect --format '{{.State.Running}}' "$cid" 2>/dev/null || echo false)"
+        health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || echo none)"
+        if [ "$running" != "true" ] || [ "$health" = "unhealthy" ]; then
+            warn "$svc lag als ${health/none/gestoppt} herum, wird neu erzeugt"
+            docker rm -f "$cid" >/dev/null 2>&1 || true
+        fi
+    done
+
+    # Ein Container gleichen Namens, den Compose nicht kennt, blockiert `up`
+    # mit einem Namenskonflikt. Der gehört zu einem früheren Versuch -- weg.
+    for name in web api db; do
+        cname="$(basename "$(pwd)" | tr '[:upper:]' '[:lower:]')-${name}-1"
+        if docker inspect "$cname" >/dev/null 2>&1 && [ -z "$($DC ps -aq "$name" 2>/dev/null)" ]; then
+            warn "Verwaister Container $cname wird entfernt"
+            docker rm -f "$cname" >/dev/null 2>&1 || true
+        fi
+    done
+fi
+
 if ! $DC up -d --build; then
     printf '\n'
     die \
@@ -152,6 +188,11 @@ if ! $DC up -d --build; then
   temporärer Swap:
     sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
     sudo mkswap /swapfile && sudo swapon /swapfile
+
+  Steht oben ein Namenskonflikt ("container name is already in use"),
+  liegt noch ein Container eines früheren Versuchs herum:
+    docker compose down --remove-orphans
+    ./start.sh
 
   Vollständige Logs:  $DC logs"
 fi
